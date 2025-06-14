@@ -444,7 +444,6 @@ def performance_test():
     })
 
 # Executar sincronização inicial ao iniciar o serviço
-@app.before_first_request
 def initial_sync_v2():
     """Executa sincronização inicial otimizada"""
     threading.Thread(target=sync_all_data_v2, daemon=True).start()
@@ -452,7 +451,14 @@ def initial_sync_v2():
 if __name__ == '__main__':
     # Executar sincronização inicial
     print("Iniciando sincronização inicial v2...")
-    threading.Thread(target=sync_all_data_v2, daemon=True).start()
     
-    app.run(host='0.0.0.0', port=3000, debug=True)
+    # Iniciar scheduler em thread separada
+    scheduler_thread = threading.Thread(target=run_scheduler_v2, daemon=True)
+    scheduler_thread.start()
+    
+    # Executar sincronização inicial
+    initial_sync_v2()
+    
+    # Iniciar aplicação Flask
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 3001)), debug=False)
 
