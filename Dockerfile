@@ -18,17 +18,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiar código da aplicação
 COPY src/ ./src/
 
-# Expor porta (Railway usa PORT do ambiente)
-EXPOSE $PORT
+# Criar usuário não-root
+RUN useradd --create-home --shell /bin/bash app \
+    && chown -R app:app /app
+USER app
 
 # Variáveis de ambiente
 ENV FLASK_APP=src/main.py
 ENV FLASK_ENV=production
 ENV PYTHONUNBUFFERED=1
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:$PORT/health || exit 1
 
 # Comando para iniciar a aplicação
 CMD ["python", "src/main.py"]

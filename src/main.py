@@ -29,7 +29,7 @@ EXTERNAL_DB_CONFIG = {
     'host': '177.115.223.216',
     'port': 5999,
     'database': 'dados_interno',
-    'user': 'userschaphz',
+    'user': 'userschapz',
     'password': 'mschaphz8881!',
     'connect_timeout': 30
 }
@@ -275,28 +275,47 @@ sync_thread.start()
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Health check avançado"""
-    # Testar pool de conexões
-    conn = get_pooled_connection()
-    db_status = 'connected' if conn else 'disconnected'
-    pool_size = len(connection_pool)
-    
-    if conn:
-        return_connection(conn)
-    
-    return jsonify({
-        'status': 'healthy',
-        'service': 'real-data-service-v2',
-        'version': '2.0',
-        'timestamp': datetime.now().isoformat(),
-        'external_db_status': db_status,
-        'connection_pool_size': pool_size,
-        'last_sync': data_cache['metadata']['last_sync'].isoformat() if data_cache['metadata']['last_sync'] else None,
-        'sync_status': data_cache['metadata']['sync_status'],
-        'sync_duration': data_cache['metadata']['sync_duration'],
-        'total_cached_records': data_cache['metadata']['total_records'],
-        'partitions': data_cache['metadata']['partitions']
-    }), 200
+    """Health check simplificado para Railway"""
+    try:
+        # Verificar se o serviço está rodando
+        current_time = datetime.now().isoformat()
+        
+        # Testar pool de conexões (sem bloquear se falhar)
+        db_status = 'unknown'
+        pool_size = 0
+        
+        try:
+            conn = get_pooled_connection()
+            if conn:
+                db_status = 'connected'
+                return_connection(conn)
+            pool_size = len(connection_pool)
+        except Exception as db_error:
+            print(f"⚠️  Health check - erro no banco: {db_error}")
+            db_status = 'disconnected'
+        
+        response_data = {
+            'status': 'healthy',
+            'service': 'real-data-service-v2',
+            'version': '2.0',
+            'timestamp': current_time,
+            'external_db_status': db_status,
+            'connection_pool_size': pool_size,
+            'sync_status': data_cache['metadata']['sync_status'],
+            'message': 'Service is running'
+        }
+        
+        print(f"✅ Health check OK - {current_time}")
+        return jsonify(response_data), 200
+        
+    except Exception as e:
+        print(f"❌ Health check error: {e}")
+        return jsonify({
+            'status': 'error',
+            'service': 'real-data-service-v2',
+            'timestamp': datetime.now().isoformat(),
+            'error': str(e)
+        }), 500
 
 @app.route('/sync/v2', methods=['POST'])
 def manual_sync_v2():
@@ -449,17 +468,47 @@ def initial_sync_v2():
     threading.Thread(target=sync_all_data_v2, daemon=True).start()
 
 if __name__ == '__main__':
-    # Executar sincronização inicial
-    print("Iniciando sincronização inicial v2...")
+    # Logs de inicialização
+    print("=" * 50)
+    print("🚀 INICIANDO FATURE REAL DATA SERVICE V2")
+    print("=" * 50)
+    
+    # Verificar variáveis de ambiente
+    port = int(os.getenv('PORT', 5000))
+    print(f"📡 Porta configurada: {port}")
+    print(f"🗄️  Banco: {EXTERNAL_DB_CONFIG['host']}:{EXTERNAL_DB_CONFIG['port']}")
+    
+    # Testar conexão com banco
+    print("🔍 Testando conexão com banco...")
+    try:
+        test_conn = psycopg2.connect(**EXTERNAL_DB_CONFIG)
+        test_conn.close()
+        print("✅ Conexão com banco OK!")
+    except Exception as e:
+        print(f"❌ Erro na conexão com banco: {e}")
+        print("⚠️  Serviço continuará sem sincronização inicial")
+    
+    # Inicializar pool de conexões
+    print("🔧 Inicializando pool de conexões...")
+    create_connection_pool()
     
     # Iniciar scheduler em thread separada
+    print("⏰ Iniciando scheduler...")
     scheduler_thread = threading.Thread(target=run_scheduler_v2, daemon=True)
     scheduler_thread.start()
     
-    # Executar sincronização inicial
+    # Executar sincronização inicial (não bloqueante)
+    print("🔄 Iniciando sincronização inicial...")
     initial_sync_v2()
     
-    # Iniciar aplicação Flask (Railway usa PORT do ambiente)
-    port = int(os.getenv('PORT', 5000))
+    print("=" * 50)
+    print(f"🌐 Servidor iniciando em 0.0.0.0:{port}")
+    print("📋 Endpoints disponíveis:")
+    print("   - GET /health - Health check")
+    print("   - GET /data/v2/users - Dados de usuários")
+    print("   - GET /data/v2/stats - Estatísticas")
+    print("=" * 50)
+    
+    # Iniciar aplicação Flask
     app.run(host='0.0.0.0', port=port, debug=False)
 
