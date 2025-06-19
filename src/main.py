@@ -34,12 +34,10 @@ EXTERNAL_DB_CONFIG = {
     'connect_timeout': 30
 }
 
-# Cache avançado com particionamento
+# Cache adaptado para tabelas existentes
 data_cache = {
     'users': defaultdict(list),
     'transactions': defaultdict(list),
-    'affiliates': defaultdict(list),
-    'commissions': defaultdict(list),
     'metadata': {
         'last_sync': None,
         'sync_status': 'never_synced',
@@ -98,37 +96,32 @@ def fetch_data_partition(table_name, offset, limit):
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
-        # Queries otimizadas com paginação
+        # Queries adaptadas para a estrutura real do banco
         queries = {
             'users': f"""
-                SELECT id, nome, email, telefone, status, data_cadastro, tipo_usuario,
-                       EXTRACT(EPOCH FROM data_cadastro) as timestamp_cadastro
-                FROM usuarios 
-                WHERE ativo = true 
+                SELECT id, login as nome, email, 
+                       CASE WHEN is_admin THEN 'admin' ELSE 'user' END as tipo_usuario,
+                       created_at as data_cadastro,
+                       EXTRACT(EPOCH FROM created_at) as timestamp_cadastro,
+                       'ativo' as status
+                FROM users 
                 ORDER BY id
                 OFFSET {offset} LIMIT {limit}
             """,
             'transactions': f"""
-                SELECT id, usuario_id, valor, tipo_transacao, status, data_transacao, descricao,
-                       EXTRACT(EPOCH FROM data_transacao) as timestamp_transacao
-                FROM transacoes 
-                WHERE data_transacao >= NOW() - INTERVAL '60 days'
-                ORDER BY id
-                OFFSET {offset} LIMIT {limit}
-            """,
-            'affiliates': f"""
-                SELECT id, usuario_id, codigo_afiliado, nivel, comissao_percentual, status, data_ativacao,
-                       EXTRACT(EPOCH FROM data_ativacao) as timestamp_ativacao
-                FROM afiliados 
-                WHERE status = 'ativo'
-                ORDER BY id
-                OFFSET {offset} LIMIT {limit}
-            """,
-            'commissions': f"""
-                SELECT id, afiliado_id, transacao_id, valor_comissao, percentual, status, data_calculo,
-                       EXTRACT(EPOCH FROM data_calculo) as timestamp_calculo
-                FROM comissoes 
-                WHERE data_calculo >= NOW() - INTERVAL '30 days'
+                SELECT id, account_id as usuario_id, amount as valor, 
+                       CASE 
+                           WHEN deposit_id IS NOT NULL THEN 'deposito'
+                           WHEN withdraw_id IS NOT NULL THEN 'saque'
+                           WHEN game IS NOT NULL THEN 'jogo'
+                           ELSE 'outros'
+                       END as tipo_transacao,
+                       'processado' as status,
+                       COALESCE(game, 'N/A') as descricao,
+                       created_at as data_transacao,
+                       EXTRACT(EPOCH FROM created_at) as timestamp_transacao
+                FROM transactions 
+                WHERE created_at >= NOW() - INTERVAL '60 days'
                 ORDER BY id
                 OFFSET {offset} LIMIT {limit}
             """
@@ -161,10 +154,8 @@ def sync_table_parallel(table_name, max_workers=4):
         cursor = conn.cursor()
         
         count_queries = {
-            'users': "SELECT COUNT(*) FROM usuarios WHERE ativo = true",
-            'transactions': "SELECT COUNT(*) FROM transacoes WHERE data_transacao >= NOW() - INTERVAL '60 days'",
-            'affiliates': "SELECT COUNT(*) FROM afiliados WHERE status = 'ativo'",
-            'commissions': "SELECT COUNT(*) FROM comissoes WHERE data_calculo >= NOW() - INTERVAL '30 days'"
+            'users': "SELECT COUNT(*) FROM users",
+            'transactions': "SELECT COUNT(*) FROM transactions WHERE created_at >= NOW() - INTERVAL '60 days'"
         }
         
         if table_name in count_queries:
@@ -212,8 +203,8 @@ def sync_all_data_v2():
         try:
             data_cache['metadata']['sync_status'] = 'syncing'
             
-            # Sincronizar cada tipo de dado em paralelo
-            tables = ['users', 'transactions', 'affiliates', 'commissions']
+            # Sincronizar apenas tabelas que existem
+            tables = ['users', 'transactions']
             total_records = 0
             
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -418,7 +409,7 @@ def get_stats_v2():
         }
         
         # Contar registros por tabela e partição
-        for table in ['users', 'transactions', 'affiliates', 'commissions']:
+        for table in ['users', 'transactions']:
             table_total = sum(len(partition) for partition in data_cache[table].values())
             stats['records_by_table'][table] = table_total
             
