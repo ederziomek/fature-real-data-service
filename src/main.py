@@ -24,15 +24,15 @@ CORS(app, origins="*")
 app.config['SECRET_KEY'] = 'real_data_service_v2_secret_2025'
 app.config['MAX_WORKERS'] = 4  # Para processamento paralelo
 
-# Configurações do banco externo (operação) com timeout aumentado
+# Configurações do banco externo (operação) com timeout otimizado
 EXTERNAL_DB_CONFIG = {
     'host': '177.115.223.216',
     'port': 5999,
     'database': 'dados_interno',
     'user': 'userschapz',
     'password': 'mschaphz8881!',
-    'connect_timeout': 60,
-    'options': '-c statement_timeout=300000'  # 5 minutos
+    'connect_timeout': 30,  # Reduzido para 30s
+    'options': '-c statement_timeout=60000'  # Reduzido para 1 minuto
 }
 
 # Cache adaptado para tabelas reais
@@ -153,7 +153,7 @@ def fetch_data_partition(table_name, offset, limit):
                     EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) as timestamp_ativacao
                 FROM tracked 
                 WHERE tracked_type_id = 1
-                ORDER BY user_afil
+                ORDER BY id
                 LIMIT {limit} OFFSET {offset}
             """,
             'bets': f"""
@@ -512,11 +512,12 @@ def get_transactions_v2():
 
 @app.route('/data/v2/affiliates', methods=['GET'])
 def get_affiliates_v2():
-    """Retorna dados de afiliados com busca otimizada e resposta rápida"""
+    """Retorna dados de afiliados com busca otimizada e timeout reduzido"""
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 50, type=int)
+    per_page = min(request.args.get('per_page', 10, type=int), 50)  # Máximo 50 por página
     partition = request.args.get('partition', None, type=int)
     
+    # Tentar cache primeiro
     with cache_lock:
         if partition is not None and partition in data_cache['affiliates']:
             affiliates_data = data_cache['affiliates'][partition]
@@ -525,30 +526,31 @@ def get_affiliates_v2():
             for partition_data in data_cache['affiliates'].values():
                 affiliates_data.extend(partition_data)
     
-    # Se não há dados no cache, retornar resposta rápida com dados básicos
+    # Se não há dados no cache, fazer consulta rápida e limitada
     if not affiliates_data:
-        # Tentar buscar dados básicos diretamente do banco com timeout curto
         try:
             conn = get_pooled_connection()
             if conn:
                 cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                
+                # Query super simples e rápida - apenas primeiros registros
                 cursor.execute("""
                     SELECT 
-                        tracked_type_id as id,
-                        'Afiliado' as nome,
-                        'ativo' as status,
-                        NOW() as data_cadastro
+                        id,
+                        user_afil as afiliado_id,
+                        user_id as usuario_indicado_id,
+                        tracked_type_id as tipo_vinculo,
+                        'ativo' as status
                     FROM tracked 
-                    WHERE tracked_type_id = 1 
-                    LIMIT %s OFFSET %s
-                """, (per_page, (page - 1) * per_page))
+                    WHERE tracked_type_id = 1
+                    ORDER BY id
+                    LIMIT %s
+                """, (per_page,))
                 
                 basic_affiliates = [dict(row) for row in cursor.fetchall()]
+                total = len(basic_affiliates)
                 
-                # Contar total rapidamente
-                cursor.execute("SELECT COUNT(*) FROM tracked WHERE tracked_type_id = 1")
-                total = cursor.fetchone()[0]
-                
+                cursor.close()
                 return_connection(conn)
                 
                 return jsonify({
@@ -557,19 +559,20 @@ def get_affiliates_v2():
                         'page': page,
                         'per_page': per_page,
                         'total': total,
-                        'pages': (total + per_page - 1) // per_page
+                        'pages': 1 if total > 0 else 0
                     },
                     'metadata': {
                         'last_sync': None,
                         'partitions_available': [],
                         'version': '2.0',
-                        'cache_status': 'direct_query',
-                        'note': 'Dados básicos - sincronização em andamento'
+                        'cache_status': 'direct_query_limited',
+                        'note': 'Consulta limitada para resposta rápida'
                     }
                 })
         except Exception as e:
             print(f"Erro na consulta rápida de afiliados: {e}")
     
+    # Paginação dos dados em cache
     start = (page - 1) * per_page
     end = start + per_page
     affiliates = affiliates_data[start:end]
@@ -581,7 +584,7 @@ def get_affiliates_v2():
             'page': page,
             'per_page': per_page,
             'total': total,
-            'pages': (total + per_page - 1) // per_page
+            'pages': (total + per_page - 1) // per_page if total > 0 else 0
         },
         'metadata': {
             'last_sync': data_cache['metadata']['last_sync'].isoformat() if data_cache['metadata']['last_sync'] else None,
