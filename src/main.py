@@ -34,10 +34,12 @@ EXTERNAL_DB_CONFIG = {
     'connect_timeout': 30
 }
 
-# Cache adaptado para tabelas existentes
+# Cache adaptado para tabelas reais
 data_cache = {
     'users': defaultdict(list),
     'transactions': defaultdict(list),
+    'affiliates': defaultdict(list),
+    'bets': defaultdict(list),
     'metadata': {
         'last_sync': None,
         'sync_status': 'never_synced',
@@ -96,33 +98,76 @@ def fetch_data_partition(table_name, offset, limit):
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
-        # Queries adaptadas para a estrutura real do banco
+        # Queries adaptadas para as tabelas reais do banco
         queries = {
             'users': f"""
-                SELECT id, login as nome, email, 
-                       CASE WHEN is_admin THEN 'admin' ELSE 'user' END as tipo_usuario,
-                       created_at as data_cadastro,
-                       EXTRACT(EPOCH FROM created_at) as timestamp_cadastro,
+                SELECT user_id as id, user_id as nome, 
+                       CONCAT('user_', user_id) as email,
+                       'user' as tipo_usuario,
+                       register_date as data_cadastro,
+                       EXTRACT(EPOCH FROM register_date) as timestamp_cadastro,
                        'ativo' as status
-                FROM users 
-                ORDER BY id
+                FROM cadastro 
+                ORDER BY user_id
                 OFFSET {offset} LIMIT {limit}
             """,
             'transactions': f"""
-                SELECT id, account_id as usuario_id, amount as valor, 
-                       CASE 
-                           WHEN deposit_id IS NOT NULL THEN 'deposito'
-                           WHEN withdraw_id IS NOT NULL THEN 'saque'
-                           WHEN game IS NOT NULL THEN 'jogo'
-                           ELSE 'outros'
-                       END as tipo_transacao,
-                       'processado' as status,
-                       COALESCE(game, 'N/A') as descricao,
-                       created_at as data_transacao,
-                       EXTRACT(EPOCH FROM created_at) as timestamp_transacao
-                FROM transactions 
-                WHERE created_at >= NOW() - INTERVAL '60 days'
-                ORDER BY id
+                SELECT 
+                    CONCAT('dep_', id) as id,
+                    user_id as usuario_id,
+                    amount as valor,
+                    'deposito' as tipo_transacao,
+                    status,
+                    'Depósito' as descricao,
+                    data_deposito as data_transacao,
+                    EXTRACT(EPOCH FROM data_deposito) as timestamp_transacao
+                FROM depositos 
+                WHERE data_deposito >= NOW() - INTERVAL '60 days'
+                
+                UNION ALL
+                
+                SELECT 
+                    CONCAT('saq_', id) as id,
+                    user_id as usuario_id,
+                    valor,
+                    'saque' as tipo_transacao,
+                    status,
+                    'Saque' as descricao,
+                    data_saques as data_transacao,
+                    EXTRACT(EPOCH FROM data_saques) as timestamp_transacao
+                FROM saques 
+                WHERE data_saques >= NOW() - INTERVAL '60 days'
+                
+                ORDER BY data_transacao DESC
+                OFFSET {offset} LIMIT {limit}
+            """,
+            'affiliates': f"""
+                SELECT 
+                    id,
+                    user_afil as afiliado_id,
+                    user_id as usuario_indicado_id,
+                    tracked_type_id as tipo_vinculo,
+                    'ativo' as status,
+                    CURRENT_TIMESTAMP as data_ativacao,
+                    EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) as timestamp_ativacao
+                FROM tracked 
+                WHERE tracked_type_id = 1
+                ORDER BY user_afil
+                OFFSET {offset} LIMIT {limit}
+            """,
+            'bets': f"""
+                SELECT 
+                    casino_id as id,
+                    user_id,
+                    game_name,
+                    bet_amount as valor_aposta,
+                    earned_value as valor_ganho,
+                    status,
+                    played_date as data_aposta,
+                    EXTRACT(EPOCH FROM played_date) as timestamp_aposta
+                FROM casino_bets_v 
+                WHERE played_date >= NOW() - INTERVAL '30 days'
+                ORDER BY played_date DESC
                 OFFSET {offset} LIMIT {limit}
             """
         }
@@ -154,8 +199,15 @@ def sync_table_parallel(table_name, max_workers=4):
         cursor = conn.cursor()
         
         count_queries = {
-            'users': "SELECT COUNT(*) FROM users",
-            'transactions': "SELECT COUNT(*) FROM transactions WHERE created_at >= NOW() - INTERVAL '60 days'"
+            'users': "SELECT COUNT(*) FROM cadastro",
+            'transactions': """
+                SELECT (
+                    (SELECT COUNT(*) FROM depositos WHERE data_deposito >= NOW() - INTERVAL '60 days') +
+                    (SELECT COUNT(*) FROM saques WHERE data_saques >= NOW() - INTERVAL '60 days')
+                ) as total
+            """,
+            'affiliates': "SELECT COUNT(*) FROM tracked WHERE tracked_type_id = 1",
+            'bets': "SELECT COUNT(*) FROM casino_bets_v WHERE played_date >= NOW() - INTERVAL '30 days'"
         }
         
         if table_name in count_queries:
@@ -203,8 +255,8 @@ def sync_all_data_v2():
         try:
             data_cache['metadata']['sync_status'] = 'syncing'
             
-            # Sincronizar apenas tabelas que existem
-            tables = ['users', 'transactions']
+            # Sincronizar tabelas reais do banco
+            tables = ['users', 'transactions', 'affiliates', 'bets']
             total_records = 0
             
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -393,6 +445,76 @@ def get_transactions_v2():
         }
     })
 
+@app.route('/data/v2/affiliates', methods=['GET'])
+def get_affiliates_v2():
+    """Retorna dados de afiliados com busca otimizada"""
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 50, type=int)
+    partition = request.args.get('partition', None, type=int)
+    
+    with cache_lock:
+        if partition is not None and partition in data_cache['affiliates']:
+            affiliates_data = data_cache['affiliates'][partition]
+        else:
+            affiliates_data = []
+            for partition_data in data_cache['affiliates'].values():
+                affiliates_data.extend(partition_data)
+    
+    start = (page - 1) * per_page
+    end = start + per_page
+    affiliates = affiliates_data[start:end]
+    total = len(affiliates_data)
+    
+    return jsonify({
+        'affiliates': affiliates,
+        'pagination': {
+            'page': page,
+            'per_page': per_page,
+            'total': total,
+            'pages': (total + per_page - 1) // per_page
+        },
+        'metadata': {
+            'last_sync': data_cache['metadata']['last_sync'].isoformat() if data_cache['metadata']['last_sync'] else None,
+            'partitions_available': list(data_cache['affiliates'].keys()),
+            'version': '2.0'
+        }
+    })
+
+@app.route('/data/v2/bets', methods=['GET'])
+def get_bets_v2():
+    """Retorna dados de apostas com busca otimizada"""
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 50, type=int)
+    partition = request.args.get('partition', None, type=int)
+    
+    with cache_lock:
+        if partition is not None and partition in data_cache['bets']:
+            bets_data = data_cache['bets'][partition]
+        else:
+            bets_data = []
+            for partition_data in data_cache['bets'].values():
+                bets_data.extend(partition_data)
+    
+    start = (page - 1) * per_page
+    end = start + per_page
+    bets = bets_data[start:end]
+    total = len(bets_data)
+    
+    return jsonify({
+        'bets': bets,
+        'pagination': {
+            'page': page,
+            'per_page': per_page,
+            'total': total,
+            'pages': (total + per_page - 1) // per_page
+        },
+        'metadata': {
+            'last_sync': data_cache['metadata']['last_sync'].isoformat() if data_cache['metadata']['last_sync'] else None,
+            'partitions_available': list(data_cache['bets'].keys()),
+            'version': '2.0'
+        }
+    })
+
 @app.route('/data/v2/stats', methods=['GET'])
 def get_stats_v2():
     """Estatísticas avançadas dos dados"""
@@ -409,7 +531,7 @@ def get_stats_v2():
         }
         
         # Contar registros por tabela e partição
-        for table in ['users', 'transactions']:
+        for table in ['users', 'transactions', 'affiliates', 'bets']:
             table_total = sum(len(partition) for partition in data_cache[table].values())
             stats['records_by_table'][table] = table_total
             
