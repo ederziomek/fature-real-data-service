@@ -316,8 +316,28 @@ create_connection_pool()
 sync_thread = threading.Thread(target=background_sync_v2, daemon=True)
 sync_thread.start()
 
+@app.route('/', methods=['GET'])
+def root():
+    """Rota raiz do serviço"""
+    return jsonify({
+        'service': 'fature-real-data-service',
+        'version': '2.0',
+        'status': 'running',
+        'message': 'Fature Real Data Service v2.0 - Operational',
+        'endpoints': {
+            'health': '/health',
+            'users': '/data/v2/users',
+            'transactions': '/data/v2/transactions',
+            'affiliates': '/data/v2/affiliates',
+            'bets': '/data/v2/bets',
+            'stats': '/data/v2/stats',
+            'sync': '/sync/v2 (POST)'
+        },
+        'timestamp': datetime.now().isoformat()
+    })
+
 @app.route('/health', methods=['GET'])
-def health_check():
+def health_check_v2():
     """Health check otimizado para Railway - resposta rápida garantida"""
     try:
         current_time = datetime.now().isoformat()
