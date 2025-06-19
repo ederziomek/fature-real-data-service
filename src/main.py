@@ -24,14 +24,15 @@ CORS(app, origins="*")
 app.config['SECRET_KEY'] = 'real_data_service_v2_secret_2025'
 app.config['MAX_WORKERS'] = 4  # Para processamento paralelo
 
-# Configurações do banco externo (operação)
+# Configurações do banco externo (operação) com timeout aumentado
 EXTERNAL_DB_CONFIG = {
     'host': '177.115.223.216',
     'port': 5999,
     'database': 'dados_interno',
     'user': 'userschapz',
     'password': 'mschaphz8881!',
-    'connect_timeout': 30
+    'connect_timeout': 60,
+    'options': '-c statement_timeout=300000'  # 5 minutos
 }
 
 # Cache adaptado para tabelas reais
@@ -98,7 +99,7 @@ def fetch_data_partition(table_name, offset, limit):
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
-        # Queries adaptadas para as tabelas reais do banco
+        # Queries adaptadas para as tabelas reais do banco com LIMIT
         queries = {
             'users': f"""
                 SELECT user_id as id, user_id as nome, 
@@ -109,7 +110,7 @@ def fetch_data_partition(table_name, offset, limit):
                        'ativo' as status
                 FROM cadastro 
                 ORDER BY user_id
-                OFFSET {offset} LIMIT {limit}
+                LIMIT {limit} OFFSET {offset}
             """,
             'transactions': f"""
                 SELECT 
@@ -139,7 +140,7 @@ def fetch_data_partition(table_name, offset, limit):
                 WHERE data_saques >= NOW() - INTERVAL '60 days'
                 
                 ORDER BY data_transacao DESC
-                OFFSET {offset} LIMIT {limit}
+                LIMIT {limit} OFFSET {offset}
             """,
             'affiliates': f"""
                 SELECT 
@@ -153,7 +154,7 @@ def fetch_data_partition(table_name, offset, limit):
                 FROM tracked 
                 WHERE tracked_type_id = 1
                 ORDER BY user_afil
-                OFFSET {offset} LIMIT {limit}
+                LIMIT {limit} OFFSET {offset}
             """,
             'bets': f"""
                 SELECT 
@@ -168,7 +169,7 @@ def fetch_data_partition(table_name, offset, limit):
                 FROM casino_bets_v 
                 WHERE played_date >= NOW() - INTERVAL '30 days'
                 ORDER BY played_date DESC
-                OFFSET {offset} LIMIT {limit}
+                LIMIT {limit} OFFSET {offset}
             """
         }
         
